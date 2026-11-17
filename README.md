@@ -18,101 +18,33 @@
 
 ## 二、系统架构图
 
-下图按分层展示模块职责与数据流。接入层只做校验与路由，服务层承载全部业务规则，核心组件层是自研队列、线程池与无锁指标，持久层通过 MyBatis 操作 H2。**数据库是唯一真相源**，内存队列只是加速调度的有界窗口；`LifecycleConfig` 在应用就绪与容器关闭两个时间点驱动恢复与停机。
+如下图按分层展示模块职责与数据流。接入层只做校验与路由，服务层承载全部业务规则，核心组件层是自研队列、线程池与无锁指标，持久层通过 MyBatis 操作 H2。**数据库是唯一真相源**，内存队列只是加速调度的有界窗口；`LifecycleConfig` 在应用就绪与容器关闭两个时间点驱动恢复与停机。
 
-```mermaid
-flowchart TB
-    HTTP["HTTP 客户端"]
+![系统架构图](docs/images/architecture.png)
 
-    subgraph WEB["接入层 · web"]
-        CTRL["TaskController<br/>submit / query / stats / metrics"]
-    end
+## 三、代码结构图
 
-    subgraph APP["服务层 · service"]
-        SUB["TaskSubmitService<br/>幂等校验 · 落库 · 入队"]
-        QUERY["TaskQueryService<br/>查询 · 统计 · 指标"]
-        WORKER["TaskWorkerService<br/>CAS 领取 · 执行 · 写结果"]
-        RETRY["RetryScheduler<br/>到期重试扫描"]
-        RECOVER["TaskRecoveryService<br/>启动与定时恢复"]
-        SHUT["TaskShutdownService<br/>优雅停机"]
-    end
+代码按职责分包，共 38 个 Java 类（约 2868 行），自顶向下依赖：`web → service → queue / persistence → domain / common`，`config` 横切生命周期与线程池配置。
 
-    subgraph CORE["核心组件 · queue / config"]
-        QUEUE["BoundedPriorityTaskQueue<br/>有界优先队列 · 背压 · drainAll"]
-        POOL["ThreadPoolTaskExecutor<br/>具名工作线程"]
-        METRICS["TaskMetrics<br/>无锁原子计数"]
-    end
+![代码结构图](docs/images/code-structure.png)
 
-    subgraph PERSIST["持久层 · persistence"]
-        MAPPER["TaskMapper / TaskResultMapper<br/>MyBatis · 乐观锁 CAS"]
-    end
+| 包 | 职责 | 关键类 |
+|---|---|---|
+| `web` | REST 接入，不含业务逻辑 | `TaskController` |
+| `service` / `service.impl` | 提交幂等、处理重试、恢复停机全链路 | `TaskSubmitService`、`TaskWorkerService`、`RetryScheduler` 等 |
+| `queue` | 自研有界优先队列、背压、无锁指标 | `BoundedPriorityTaskQueue`、`TaskMetrics` |
+| `persistence` | MyBatis 数据访问、乐观锁 CAS、双表 | `TaskMapper`、`TaskEntity` |
+| `domain` | DTO / VO / 队列句柄，层间数据载体 | `SubmitRequest`、`TaskQueryVo`、`TaskHandle` |
+| `config` | 生命周期钩子、配置属性、线程池 | `LifecycleConfig`、`TaskExecutorConfig` |
+| `common` | 统一返回、枚举、异常体系 | `Result`、`TaskStatusEnum`、`GlobalExceptionHandler` |
 
-    subgraph STORE["存储 · H2 文件库"]
-        TASK[("task 表<br/>唯一真相源")]
-        RESULT[("task_result 表")]
-    end
-
-    LC["LifecycleConfig<br/>ApplicationReadyEvent / ContextClosedEvent"]
-
-    HTTP --> CTRL
-    CTRL --> SUB
-    CTRL --> QUERY
-    CTRL -. 停机时拒绝 .-> SHUT
-
-    SUB --> MAPPER
-    SUB --> QUEUE
-    QUEUE --> POOL
-    POOL --> WORKER
-    WORKER --> MAPPER
-    WORKER --> METRICS
-    QUERY --> MAPPER
-    QUERY --> METRICS
-    RETRY --> MAPPER
-    RETRY --> QUEUE
-    RECOVER --> MAPPER
-    RECOVER --> QUEUE
-
-    MAPPER --> TASK
-    MAPPER --> RESULT
-
-    LC --> RECOVER
-    LC --> WORKER
-    LC --> SHUT
-```
-
-## 三、任务处理流程图
+## 四、任务处理流程图
 
 从提交到终态的完整链路。三个关键点：**接收成功的边界是数据库事务提交而非入队成功**；入队失败与重试入队失败都不删库，由恢复扫描兜底；失败不直接回队列，而是落库 `RETRY_WAITING` + `nextRetryAt`，由调度器延迟 CAS 回队，避免失败瞬间放大队列压力。
 
-```mermaid
-flowchart TD
-    START(["POST /api/tasks 提交任务"]) --> VALID{"任务类型合法?"}
-    VALID -- 否 --> E1["INVALID_TASK_TYPE · 400"]
-    VALID -- 是 --> TX["编程式事务（独立于入队）"]
-    TX --> IDEM{"business_key 已存在?"}
-    IDEM -- 是 --> SAME["复用已有任务 ID"]
-    IDEM -- 否 --> INSERT["INSERT task · status=WAITING<br/>事务提交即接收成功"]
-    INSERT --> OFFER{"入队成功?<br/>offer 最多等 offer-timeout-ms"}
-    OFFER -- 否 --> FULL["HTTP 429 QUEUE_FULL<br/>任务已落库，不丢失"]
-    OFFER -- 是 --> QUEUE["有界优先队列<br/>优先级高先出 · 同级 FIFO"]
-    QUEUE --> CAS["工作线程 poll<br/>CAS 领取 WAITING→RUNNING · version+1"]
-    CAS --> EXEC["模拟执行（按任务类型耗时）"]
-    EXEC --> RES{"执行结果?"}
-    RES -- 成功 --> SUC["同事务：写 task_result + status=SUCCESS"]
-    RES -- 失败 --> CAT{"失败分类与重试次数"}
-    CAT -- "SYSTEM_FATAL 或 超过 maxAttempts" --> DL["status=DEAD_LETTER<br/>记录 fail_reason"]
-    CAT -- "BUSINESS / SYSTEM_RECOVERABLE 且未超限" --> RW["status=RETRY_WAITING<br/>retryCount+1 · nextRetryAt=now+退避"]
-    RW --> SCAN["RetryScheduler 定时扫描到期任务<br/>CAS RETRY_WAITING→WAITING"]
-    SCAN --> QUEUE
-    FULL --> RECOV["恢复扫描重新入队"]
-    RECOV --> QUEUE
-    SUC --> FIN(["终态"])
-    DL --> FIN
-    SAME --> FIN
-    E1 --> FIN
-```
+![任务处理流程图](docs/images/flow.png)
 
-## 四、核心设计
+## 五、核心设计
 
 ### 1. 任务不丢失（最重要）
 
@@ -163,7 +95,7 @@ flowchart TD
 
 `GET /api/tasks/metrics` 暴露：队列长度/容量、活跃线程数、池大小、成功/失败/重试/死信计数、平均排队时长、平均处理时长、各状态数量。统计使用无锁原子计数，避免统计本身成为热点。
 
-## 五、接口
+## 六、接口
 
 | 方法 | 路径 | 说明 |
 |---|---|---|
@@ -182,7 +114,7 @@ curl -X POST http://localhost:8080/api/tasks \
 
 > 测试技巧：`payload` 含 `FORCE_FAIL` 模拟可重试的业务失败；含 `FATAL_ERROR` 模拟不可恢复失败（直接死信）。
 
-## 六、如何运行
+## 七、如何运行
 
 ```bash
 # 无需本地安装 Maven，Wrapper 自动使用 Maven 3.9.9
@@ -197,13 +129,13 @@ curl -X POST http://localhost:8080/api/tasks \
 
 H2 使用文件持久化模式（`./data/taskdb.mv.db`），重启数据保留；DDL 见 `src/main/resources/schema.sql`，启动自动建表。任务状态表 `task` 与结果表 `task_result` 分离，便于查询与清理。
 
-## 七、测试覆盖
+## 八、测试覆盖
 
 - `BoundedPriorityTaskQueueTest`：有界容量、背压拒绝、优先级与 FIFO、drainAll、并发生产消费不丢任务。
 - `RetryPropertiesTest`：指数退避与上限。
 - `TaskSubmitIntegrationTest`：提交落库、业务键幂等。
 - `ShutdownRecoveryIntegrationTest`：优雅停机后任务不丢失、内存队列回写。
 
-## 八、代码规范
+## 九、代码规范
 
 遵循阿里巴巴 Java 开发手册：包名全小写、类名大驼峰、常量全大写、枚举以 `Enum` 结尾、覆写方法加 `@Override`、POJO 布尔属性不加 `is` 前缀、序列化类显式 `serialVersionUID`、集合初始化指定容量、日志使用 SLF4J 占位符、事务边界在 Service 层、DTO/DO/VO 分层、统一异常处理、禁止魔法值。关键对话见 `docs/ai-dialogue.md`。
