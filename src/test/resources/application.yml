@@ -1,0 +1,25 @@
+# 测试环境使用内存 H2，避免与文件模式的生产数据库冲突
+spring:
+  datasource:
+    url: jdbc:h2:mem:testdb;DB_CLOSE_DELAY=-1;MODE=MySQL
+    driver-class-name: org.h2.Driver
+    username: sa
+    password:
+  sql:
+    init:
+      mode: always
+      schema-locations: classpath:schema.sql
+
+mybatis:
+  mapper-locations: classpath:mapper/*.xml
+  type-aliases-package: com.example.asyncqueue.persistence.entity
+  configuration:
+    map-underscore-to-camel-case: true
+
+queue:
+  core-pool-size: 2
+  max-pool-size: 2
+  capacity-factor: 8
+
+recovery:
+  scan-interval-ms: 200

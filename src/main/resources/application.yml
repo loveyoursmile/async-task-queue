@@ -1,0 +1,58 @@
+server:
+  port: 8080
+
+spring:
+  application:
+    name: async-task-queue
+  datasource:
+    # H2 文件持久化模式：重启后数据保留；DB_CLOSE_ON_EXIT=FALSE 避免退出时关闭导致数据丢失
+    # WRITE_DELAY=0 关闭异步刷盘，保证事务提交即落盘（"不丢失"的持久化边界）
+    url: jdbc:h2:file:./data/taskdb;DB_CLOSE_ON_EXIT=FALSE;WRITE_DELAY=0
+    driver-class-name: org.h2.Driver
+    username: sa
+    password:
+  sql:
+    init:
+      mode: always
+      schema-locations: classpath:schema.sql
+      continue-on-error: false
+  jackson:
+    date-format: yyyy-MM-dd HH:mm:ss
+    time-zone: GMT+8
+
+mybatis:
+  mapper-locations: classpath:mapper/*.xml
+  type-aliases-package: com.example.asyncqueue.persistence.entity
+  configuration:
+    map-underscore-to-camel-case: true
+
+# 任务队列与治理参数
+queue:
+  # 核心线程数；容量 = 线程数 × 容量系数，系数按消费速率与任务耗时配置
+  core-pool-size: 4
+  max-pool-size: 4
+  capacity-factor: 8
+  # 队列满时，offer 最多等待的毫秒数，超时即触发背压拒绝
+  offer-timeout-ms: 50
+  keep-alive-seconds: 60
+
+retry:
+  # 失败重试次数上限（不含首次执行）
+  max-attempts: 3
+  # 指数退避基数，第 n 次重试等待 base × 2^(n-1) 毫秒
+  base-delay-ms: 200
+  max-delay-ms: 5000
+
+recovery:
+  # 恢复扫描周期：扫描 WAITING / 超时 RUNNING 任务重新入队
+  scan-interval-ms: 1000
+  # RUNNING 状态超过该时长视为僵死，重启后由恢复扫描重新入队
+  running-timeout-ms: 60000
+
+shutdown:
+  # 优雅停机：等待线程池收敛的最长秒数
+  await-termination-seconds: 10
+
+logging:
+  level:
+    com.example.asyncqueue: INFO

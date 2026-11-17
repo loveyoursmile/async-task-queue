@@ -1,0 +1,120 @@
+<?xml version="1.0" encoding="UTF-8" ?>
+<!DOCTYPE mapper PUBLIC "-//mybatis.org//DTD Mapper 3.0//EN"
+        "https://mybatis.org/dtd/mybatis-3-mapper.dtd">
+<mapper namespace="com.example.asyncqueue.persistence.mapper.TaskMapper">
+
+    <resultMap id="taskResultMap" type="com.example.asyncqueue.persistence.entity.TaskEntity">
+        <id column="id" property="id"/>
+        <result column="business_key" property="businessKey"/>
+        <result column="task_type" property="taskType"/>
+        <result column="payload" property="payload"/>
+        <result column="priority" property="priority"/>
+        <result column="status" property="status"/>
+        <result column="retry_count" property="retryCount"/>
+        <result column="max_attempts" property="maxAttempts"/>
+        <result column="next_retry_at" property="nextRetryAt"/>
+        <result column="fail_reason" property="failReason"/>
+        <result column="version" property="version"/>
+        <result column="created_at" property="createdAt"/>
+        <result column="updated_at" property="updatedAt"/>
+        <result column="started_at" property="startedAt"/>
+        <result column="finished_at" property="finishedAt"/>
+    </resultMap>
+
+    <sql id="allColumns">
+        id, business_key, task_type, payload, priority, status, retry_count, max_attempts,
+        next_retry_at, fail_reason, version, created_at, updated_at, started_at, finished_at
+    </sql>
+
+    <insert id="insert" parameterType="com.example.asyncqueue.persistence.entity.TaskEntity"
+            useGeneratedKeys="true" keyProperty="id">
+        INSERT INTO task (business_key, task_type, payload, priority, status,
+                          retry_count, max_attempts, next_retry_at, fail_reason,
+                          version, created_at, updated_at)
+        VALUES (#{businessKey}, #{taskType}, #{payload}, #{priority}, #{status},
+                #{retryCount}, #{maxAttempts}, #{nextRetryAt}, #{failReason},
+                #{version}, #{createdAt}, #{updatedAt})
+    </insert>
+
+    <select id="selectByBusinessKey" resultMap="taskResultMap">
+        SELECT <include refid="allColumns"/> FROM task WHERE business_key = #{businessKey}
+    </select>
+
+    <select id="selectById" resultMap="taskResultMap">
+        SELECT <include refid="allColumns"/> FROM task WHERE id = #{taskId}
+    </select>
+
+    <update id="claimTask">
+        UPDATE task
+        SET status = 'RUNNING', version = version + 1, updated_at = #{startedAt},
+            started_at = CASE WHEN started_at IS NULL THEN #{startedAt} ELSE started_at END
+        WHERE id = #{taskId} AND version = #{expectedVer} AND status = 'WAITING'
+    </update>
+
+    <update id="markSuccess">
+        UPDATE task
+        SET status = 'SUCCESS', version = version + 1, updated_at = #{finishedAt},
+            finished_at = #{finishedAt}, fail_reason = NULL, next_retry_at = NULL
+        WHERE id = #{taskId} AND version = #{expectedVer} AND status = 'RUNNING'
+    </update>
+
+    <update id="markRetryWaiting">
+        UPDATE task
+        SET status = 'RETRY_WAITING', version = version + 1, updated_at = #{nextRetryAt},
+            retry_count = #{retryCount}, next_retry_at = #{nextRetryAt}, fail_reason = #{failReason}
+        WHERE id = #{taskId} AND version = #{expectedVer} AND status = 'RUNNING'
+    </update>
+
+    <update id="markDeadLetter">
+        UPDATE task
+        SET status = 'DEAD_LETTER', version = version + 1, updated_at = #{finishedAt},
+            finished_at = #{finishedAt}, fail_reason = #{failReason}, next_retry_at = NULL
+        WHERE id = #{taskId} AND version = #{expectedVer} AND status = 'RUNNING'
+    </update>
+
+    <select id="selectDueRetries" resultMap="taskResultMap">
+        SELECT <include refid="allColumns"/> FROM task
+        WHERE status = 'RETRY_WAITING' AND next_retry_at &lt;= #{now}
+        ORDER BY next_retry_at ASC LIMIT #{limit}
+    </select>
+
+    <select id="selectStaleRunning" resultMap="taskResultMap">
+        SELECT <include refid="allColumns"/> FROM task
+        WHERE status = 'RUNNING' AND updated_at &lt; #{threshold}
+        ORDER BY updated_at ASC LIMIT #{limit}
+    </select>
+
+    <select id="selectWaiting" resultMap="taskResultMap">
+        SELECT <include refid="allColumns"/> FROM task
+        WHERE status = 'WAITING'
+        ORDER BY priority DESC, created_at ASC LIMIT #{limit}
+    </select>
+
+    <update id="resetToWaiting">
+        UPDATE task
+        SET status = 'WAITING', version = version + 1, updated_at = #{now}
+        WHERE id = #{taskId} AND version = #{expectedVer} AND status = 'RETRY_WAITING'
+    </update>
+
+    <update id="resetStaleToWaiting">
+        UPDATE task
+        SET status = 'WAITING', version = version + 1, updated_at = #{now}
+        WHERE id = #{taskId} AND version = #{expectedVer} AND status = 'RUNNING'
+    </update>
+
+    <update id="requeueOnShutdown">
+        UPDATE task
+        SET version = version + 1, updated_at = #{now}
+        WHERE id = #{taskId} AND status = 'WAITING'
+    </update>
+
+    <select id="countByStatus" resultType="int">
+        SELECT COUNT(*) FROM task WHERE status = #{status}
+    </select>
+
+    <select id="countGroupByStatus"
+            resultType="com.example.asyncqueue.persistence.mapper.TaskMapper$StatusCount">
+        SELECT status, COUNT(*) AS count FROM task GROUP BY status
+    </select>
+
+</mapper>

@@ -1,0 +1,27 @@
+<?xml version="1.0" encoding="UTF-8" ?>
+<!DOCTYPE mapper PUBLIC "-//mybatis.org//DTD Mapper 3.0//EN"
+        "https://mybatis.org/dtd/mybatis-3-mapper.dtd">
+<mapper namespace="com.example.asyncqueue.persistence.mapper.TaskResultMapper">
+
+    <resultMap id="resultMap" type="com.example.asyncqueue.persistence.entity.TaskResultEntity">
+        <id column="task_id" property="taskId"/>
+        <result column="result" property="result"/>
+        <result column="cost_ms" property="costMs"/>
+        <result column="created_at" property="createdAt"/>
+    </resultMap>
+
+    <insert id="insert" parameterType="com.example.asyncqueue.persistence.entity.TaskResultEntity">
+        MERGE INTO task_result (task_id, result, cost_ms, created_at)
+        KEY (task_id)
+        VALUES (#{taskId}, #{result}, #{costMs}, #{createdAt})
+    </insert>
+
+    <select id="selectByTaskId" resultMap="resultMap">
+        SELECT task_id, result, cost_ms, created_at FROM task_result WHERE task_id = #{taskId}
+    </select>
+
+    <delete id="deleteByTaskId">
+        DELETE FROM task_result WHERE task_id = #{taskId}
+    </delete>
+
+</mapper>
